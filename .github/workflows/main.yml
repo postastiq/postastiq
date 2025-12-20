@@ -3,10 +3,13 @@ name: Build and Push Docker Image
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -17,7 +20,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to DockerHub
+      - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -30,7 +33,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPOSITORY }}:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPOSITORY }}:${{ github.sha }}
-          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPOSITORY }}:buildcache
-          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPOSITORY }}:buildcache,mode=max
+            ${{ secrets.DOCKERHUB_ORG }}/${{ secrets.DOCKERHUB_REPOSITORY }}:latest
+            ${{ secrets.DOCKERHUB_ORG }}/${{ secrets.DOCKERHUB_REPOSITORY }}:${{ github.sha }}
+          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_ORG }}/${{ secrets.DOCKERHUB_REPOSITORY }}:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_ORG }}/${{ secrets.DOCKERHUB_REPOSITORY }}:buildcache,mode=max
