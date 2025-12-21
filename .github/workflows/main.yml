@@ -5,6 +5,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write   # REQUIRED for AWS OIDC
 
 jobs:
   build-and-push:
@@ -20,20 +21,47 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # -----------------------------
+      # Docker Hub (public)
+      # -----------------------------
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push Docker image
+      # -----------------------------
+      # AWS ECR (OIDC, no static creds)
+      # -----------------------------
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # -----------------------------
+      # Build once, push to both
+      # -----------------------------
+      - name: Build and push Docker image (Docker Hub + ECR)
         uses: docker/build-push-action@v5
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
+            # Docker Hub
             ${{ secrets.DOCKERHUB_ORG }}/${{ secrets.DOCKERHUB_REPOSITORY }}:latest
             ${{ secrets.DOCKERHUB_ORG }}/${{ secrets.DOCKERHUB_REPOSITORY }}:${{ github.sha }}
-          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_ORG }}/${{ secrets.DOCKERHUB_REPOSITORY }}:buildcache
-          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_ORG }}/${{ secrets.DOCKERHUB_REPOSITORY }}:buildcache,mode=max
+
+            # AWS ECR (mirrored)
+            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:latest
+            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:${{ github.sha }}
+
+          cache-from: |
+            type=registry,ref=${{ secrets.DOCKERHUB_ORG }}/${{ secrets.DOCKERHUB_REPOSITORY }}:buildcache
+          cache-to: |
+            type=registry,ref=${{ secrets.DOCKERHUB_ORG }}/${{ secrets.DOCKERHUB_REPOSITORY }}:buildcache,mode=max
