@@ -10,6 +10,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      - name: Set build timestamp
+        id: timestamp
+        run: echo "BUILD_TIME=$(date -u +'%Y%m%d-%H%M')" >> $GITHUB_OUTPUT
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
@@ -45,8 +48,10 @@ jobs:
           push: true
           tags: |
             ${{ secrets.DOCKERHUB_ORG }}/${{ secrets.DOCKERHUB_REPOSITORY }}:latest
-            ${{ secrets.DOCKERHUB_ORG }}/${{ secrets.DOCKERHUB_REPOSITORY }}:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_ORG }}/${{ secrets.DOCKERHUB_REPOSITORY }}:${{ steps.timestamp.outputs.BUILD_TIME }}
+            ${{ secrets.DOCKERHUB_ORG }}/${{ secrets.DOCKERHUB_REPOSITORY }}:${{ steps.timestamp.outputs.BUILD_TIME }}-${{ github.sha }}
             ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:latest
-            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:${{ steps.timestamp.outputs.BUILD_TIME }}
+            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:${{ steps.timestamp.outputs.BUILD_TIME }}-${{ github.sha }}
           cache-from: type=registry,ref=${{ secrets.DOCKERHUB_ORG }}/${{ secrets.DOCKERHUB_REPOSITORY }}:buildcache
           cache-to: type=registry,ref=${{ secrets.DOCKERHUB_ORG }}/${{ secrets.DOCKERHUB_REPOSITORY }}:buildcache,mode=max
