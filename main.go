@@ -3123,30 +3123,25 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		dbPath = "/app/data/blog.db"
 	}
 
-	// Close current database connection
-	if db != nil {
-		db.Close()
-	}
+	// Extract database to a temp file first (safer - doesn't destroy original on failure)
+	tempDBPath := dbPath + ".restore-temp"
+	var dbExtracted bool
 
-	// Extract files from ZIP
+	// First pass: extract database file to temp location
 	for _, f := range zipReader.File {
-		// Handle database file
 		if f.Name == "blog.db" {
 			rc, err := f.Open()
 			if err != nil {
 				log.Printf("Error opening blog.db from ZIP: %v", err)
 				showSettingsMessage(w, r, "Failed to extract database", "error")
-				reconnectDB(dbPath)
 				return
 			}
 
-			// Create/overwrite database file
-			outFile, err := os.Create(dbPath)
+			outFile, err := os.Create(tempDBPath)
 			if err != nil {
 				rc.Close()
-				log.Printf("Error creating database file: %v", err)
+				log.Printf("Error creating temp database file: %v", err)
 				showSettingsMessage(w, r, "Failed to restore database", "error")
-				reconnectDB(dbPath)
 				return
 			}
 
@@ -3155,12 +3150,48 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 			rc.Close()
 
 			if err != nil {
+				os.Remove(tempDBPath)
 				log.Printf("Error writing database file: %v", err)
 				showSettingsMessage(w, r, "Failed to write database", "error")
-				reconnectDB(dbPath)
 				return
 			}
-			continue
+			dbExtracted = true
+			break
+		}
+	}
+
+	if !dbExtracted {
+		showSettingsMessage(w, r, "Invalid backup: missing blog.db", "error")
+		return
+	}
+
+	// Close current database connection before replacing file
+	if db != nil {
+		db.Close()
+		db = nil
+	}
+
+	// Move temp database to final location (atomic on same filesystem)
+	if err := os.Rename(tempDBPath, dbPath); err != nil {
+		log.Printf("Error replacing database file: %v", err)
+		os.Remove(tempDBPath)
+		// Try to reconnect to original database
+		reconnectDB(dbPath)
+		showSettingsMessage(w, r, "Failed to replace database", "error")
+		return
+	}
+
+	// Reconnect to the restored database immediately
+	if err := reconnectDB(dbPath); err != nil {
+		log.Printf("Error reconnecting to restored database: %v", err)
+		showSettingsMessage(w, r, "Database restored but reconnection failed. Please restart the server.", "error")
+		return
+	}
+
+	// Second pass: extract upload files (database is already reconnected)
+	for _, f := range zipReader.File {
+		if f.Name == "blog.db" {
+			continue // Already handled
 		}
 
 		// Handle uploads directory files
@@ -3205,25 +3236,28 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Reconnect to the restored database
-	err = reconnectDB(dbPath)
-	if err != nil {
-		log.Printf("Error reconnecting to database: %v", err)
-		showSettingsMessage(w, r, "Restore completed but database reconnection failed. Please restart the server.", "error")
-		return
-	}
-
 	log.Printf("Backup restored successfully from: %s", header.Filename)
 	showSettingsMessage(w, r, "Backup restored successfully!", "success")
 }
 
 // reconnectDB closes the existing connection and opens a new one
 func reconnectDB(dbPath string) error {
+	// Close existing connection if any
+	if db != nil {
+		db.Close()
+		db = nil
+	}
+
 	var err error
 	db, err = sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return err
 	}
+
+	// Configure connection pool for better reliability
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
 	return db.Ping()
 }
 
