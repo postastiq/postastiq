@@ -570,6 +570,7 @@ const adminTemplate = `<!DOCTYPE html>
                 <a href="/admin?view=new" class="btn btn-primary">+ New Post</a>
             </div>
 
+            <div class="content-container">
             <div class="pagination-info">
                 {{if .TotalEntries}}
                 Showing {{.StartEntry}}-{{.EndEntry}} of {{.TotalEntries}} posts
@@ -646,6 +647,7 @@ const adminTemplate = `<!DOCTYPE html>
                 {{end}}
             </div>
             {{end}}
+            </div>
 
             {{else if eq .View "new"}}
             <!-- New Post View -->
