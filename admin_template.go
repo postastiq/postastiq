@@ -130,7 +130,7 @@ const adminTemplate = `<!DOCTYPE html>
             color: #262626;
         }
         .content-container {
-            max-width: 900px;
+            max-width: 700px;
             background-color: #ffffff;
             border: 1px solid #dbdbdb;
             border-radius: 8px;
