@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -85,6 +86,15 @@ type EditorPageData struct {
 	MessageType        string
 	Entries            []Entry
 	HasPrivacyPassword bool
+	// New fields for sidebar layout and pagination
+	View         string
+	PageTitle    string
+	CurrentPage  int
+	TotalPages   int
+	TotalEntries int
+	StartEntry   int
+	EndEntry     int
+	PageNumbers  []int
 }
 
 type SinglePostPageData struct {
@@ -104,6 +114,9 @@ type SiteSettings struct {
 	AvatarPath         string
 	AvatarPreference   string // "avatar" or "initials"
 	SiteTheme          string
+	CustomBgColor      string
+	CustomTextColor    string
+	CustomAccentColor  string
 	HasViewerPassword  bool
 	HasAdminPassword   bool
 }
@@ -116,6 +129,8 @@ type SettingsPageData struct {
 	InstanceHostname      string
 	CustomDomainEnabled   bool
 	CanEnableCustomDomain bool
+	View                  string
+	PageTitle             string
 }
 
 type NotFoundPageData struct {
@@ -615,6 +630,28 @@ func initDB() error {
 		log.Println("Instance_hostname column added successfully")
 	}
 
+	// Add custom theme color columns if they don't exist
+	customColorColumns := []struct {
+		name         string
+		defaultValue string
+	}{
+		{"custom_bg_color", "#fafafa"},
+		{"custom_text_color", "#262626"},
+		{"custom_accent_color", "#0095f6"},
+	}
+	for _, col := range customColorColumns {
+		var colExists bool
+		err = db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('site_settings') WHERE name=?", col.name).Scan(&colExists)
+		if err == nil && !colExists {
+			log.Printf("Adding %s column to site_settings table...", col.name)
+			_, err = db.Exec(fmt.Sprintf(`ALTER TABLE site_settings ADD COLUMN %s TEXT DEFAULT '%s'`, col.name, col.defaultValue))
+			if err != nil {
+				return fmt.Errorf("failed to add %s column: %v", col.name, err)
+			}
+			log.Printf("%s column added successfully", col.name)
+		}
+	}
+
 
 	// Create custom_domain table for custom domain management
 	customDomainTableQuery := `
@@ -635,6 +672,77 @@ func initDB() error {
 
 	log.Println("Database connection established and table created")
 	log.Printf("Uploads directory: %s", uploadsDir)
+	return nil
+}
+
+// runDatabaseMigrations adds any missing columns to the database schema
+// This is called both at startup and after restoring a backup
+func runDatabaseMigrations() error {
+	// Add avatar_path column if it doesn't exist
+	var avatarColumnExists bool
+	err := db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('site_settings') WHERE name='avatar_path'").Scan(&avatarColumnExists)
+	if err == nil && !avatarColumnExists {
+		log.Println("Migration: Adding avatar_path column...")
+		_, err = db.Exec(`ALTER TABLE site_settings ADD COLUMN avatar_path TEXT`)
+		if err != nil {
+			return fmt.Errorf("failed to add avatar_path column: %v", err)
+		}
+	}
+
+	// Add avatar_preference column if it doesn't exist
+	var avatarPrefColumnExists bool
+	err = db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('site_settings') WHERE name='avatar_preference'").Scan(&avatarPrefColumnExists)
+	if err == nil && !avatarPrefColumnExists {
+		log.Println("Migration: Adding avatar_preference column...")
+		_, err = db.Exec(`ALTER TABLE site_settings ADD COLUMN avatar_preference TEXT DEFAULT 'initials'`)
+		if err != nil {
+			return fmt.Errorf("failed to add avatar_preference column: %v", err)
+		}
+	}
+
+	// Add password_change_required column if it doesn't exist
+	var passwordChangeColumnExists bool
+	err = db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('site_settings') WHERE name='password_change_required'").Scan(&passwordChangeColumnExists)
+	if err == nil && !passwordChangeColumnExists {
+		log.Println("Migration: Adding password_change_required column...")
+		_, err = db.Exec(`ALTER TABLE site_settings ADD COLUMN password_change_required INTEGER DEFAULT 0`)
+		if err != nil {
+			return fmt.Errorf("failed to add password_change_required column: %v", err)
+		}
+	}
+
+	// Add instance_hostname column if it doesn't exist
+	var instanceHostnameExists bool
+	err = db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('site_settings') WHERE name='instance_hostname'").Scan(&instanceHostnameExists)
+	if err == nil && !instanceHostnameExists {
+		log.Println("Migration: Adding instance_hostname column...")
+		_, err = db.Exec(`ALTER TABLE site_settings ADD COLUMN instance_hostname TEXT`)
+		if err != nil {
+			return fmt.Errorf("failed to add instance_hostname column: %v", err)
+		}
+	}
+
+	// Add custom theme color columns if they don't exist
+	customColorColumns := []struct {
+		name         string
+		defaultValue string
+	}{
+		{"custom_bg_color", "#fafafa"},
+		{"custom_text_color", "#262626"},
+		{"custom_accent_color", "#0095f6"},
+	}
+	for _, col := range customColorColumns {
+		var colExists bool
+		err = db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('site_settings') WHERE name=?", col.name).Scan(&colExists)
+		if err == nil && !colExists {
+			log.Printf("Migration: Adding %s column...", col.name)
+			_, err = db.Exec(fmt.Sprintf(`ALTER TABLE site_settings ADD COLUMN %s TEXT DEFAULT '%s'`, col.name, col.defaultValue))
+			if err != nil {
+				return fmt.Errorf("failed to add %s column: %v", col.name, err)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -2104,22 +2212,28 @@ func handleAdminIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entries, err := getAllEntries()
-	if err != nil {
-		log.Printf("Error fetching entries: %v", err)
-		http.Error(w, "Error fetching entries", http.StatusInternalServerError)
-		return
+	// Determine which view to show (default to new post form)
+	view := r.URL.Query().Get("view")
+	if view == "" {
+		view = "new"
 	}
 
+	// Template functions
 	funcMap := template.FuncMap{
-		"js":     jsEscape,
+		"jsEscape": jsEscape,
+		"add": func(a, b int) int {
+			return a + b
+		},
+		"subtract": func(a, b int) int {
+			return a - b
+		},
 	}
-	tmpl := template.Must(template.New("index").Funcs(funcMap).Parse(adminTemplate))
+	tmpl := template.Must(template.New("admin").Funcs(funcMap).Parse(adminTemplate))
 
 	// Check if viewer password is set in site_settings
 	hasPassword := false
 	var passwordHash sql.NullString
-	err = db.QueryRow("SELECT viewer_password_hash FROM site_settings WHERE id = 1").Scan(&passwordHash)
+	err := db.QueryRow("SELECT viewer_password_hash FROM site_settings WHERE id = 1").Scan(&passwordHash)
 	if err == nil && passwordHash.Valid && passwordHash.String != "" {
 		hasPassword = true
 	}
@@ -2128,7 +2242,6 @@ func handleAdminIndex(w http.ResponseWriter, r *http.Request) {
 	var message, messageType string
 	if cookie, err := r.Cookie("flash_message"); err == nil {
 		message = cookie.Value
-		// Clear the cookie
 		http.SetCookie(w, &http.Cookie{
 			Name:   "flash_message",
 			Value:  "",
@@ -2138,7 +2251,6 @@ func handleAdminIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	if cookie, err := r.Cookie("flash_type"); err == nil {
 		messageType = cookie.Value
-		// Clear the cookie
 		http.SetCookie(w, &http.Cookie{
 			Name:   "flash_type",
 			Value:  "",
@@ -2148,10 +2260,85 @@ func handleAdminIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := EditorPageData{
-		Entries:            entries,
 		HasPrivacyPassword: hasPassword,
 		Message:            message,
 		MessageType:        messageType,
+		View:               view,
+		PageTitle:          "Posts",
+	}
+
+	// For posts view, fetch paginated entries
+	if view == "posts" {
+		// Pagination settings
+		perPage := 20
+		pageStr := r.URL.Query().Get("page")
+		currentPage, err := strconv.Atoi(pageStr)
+		if err != nil || currentPage < 1 {
+			currentPage = 1
+		}
+
+		// Get total count
+		var totalEntries int
+		err = db.QueryRow("SELECT COUNT(*) FROM entries").Scan(&totalEntries)
+		if err != nil {
+			log.Printf("Error counting entries: %v", err)
+			totalEntries = 0
+		}
+
+		// Calculate pagination
+		totalPages := (totalEntries + perPage - 1) / perPage
+		if totalPages < 1 {
+			totalPages = 1
+		}
+		if currentPage > totalPages {
+			currentPage = totalPages
+		}
+
+		offset := (currentPage - 1) * perPage
+
+		// Fetch entries for current page
+		entries, err := getPaginatedEntries(offset, perPage)
+		if err != nil {
+			log.Printf("Error fetching entries: %v", err)
+			entries = []Entry{}
+		}
+
+		// Calculate page numbers to show (max 5 pages around current)
+		var pageNumbers []int
+		startPage := currentPage - 2
+		if startPage < 1 {
+			startPage = 1
+		}
+		endPage := startPage + 4
+		if endPage > totalPages {
+			endPage = totalPages
+			startPage = endPage - 4
+			if startPage < 1 {
+				startPage = 1
+			}
+		}
+		for i := startPage; i <= endPage; i++ {
+			pageNumbers = append(pageNumbers, i)
+		}
+
+		// Calculate start/end entry numbers for display
+		startEntry := offset + 1
+		endEntry := offset + len(entries)
+		if totalEntries == 0 {
+			startEntry = 0
+			endEntry = 0
+		}
+
+		data.Entries = entries
+		data.CurrentPage = currentPage
+		data.TotalPages = totalPages
+		data.TotalEntries = totalEntries
+		data.StartEntry = startEntry
+		data.EndEntry = endEntry
+		data.PageNumbers = pageNumbers
+		data.PageTitle = "Posts"
+	} else if view == "new" {
+		data.PageTitle = "New Post"
 	}
 
 	tmpl.Execute(w, data)
@@ -2541,7 +2728,7 @@ func showMessage(w http.ResponseWriter, r *http.Request, message, messageType st
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
 
-func showSettingsMessage(w http.ResponseWriter, r *http.Request, message, messageType string) {
+func showSettingsMessage(w http.ResponseWriter, r *http.Request, message, messageType, section string) {
 	// Set flash message cookie
 	http.SetCookie(w, &http.Cookie{
 		Name:     "flash_message",
@@ -2558,8 +2745,17 @@ func showSettingsMessage(w http.ResponseWriter, r *http.Request, message, messag
 		HttpOnly: true,
 	})
 
-	// Redirect to settings page
-	http.Redirect(w, r, "/admin/settings", http.StatusSeeOther)
+	// Redirect to appropriate settings section
+	redirectURL := "/admin/settings"
+	switch section {
+	case "appearance":
+		redirectURL = "/admin/settings/appearance"
+	case "security":
+		redirectURL = "/admin/settings/security"
+	case "backup":
+		redirectURL = "/admin/settings/backup"
+	}
+	http.Redirect(w, r, redirectURL, http.StatusSeeOther)
 }
 
 func jsEscape(s string) string {
@@ -2577,9 +2773,487 @@ func getThemeCSS() string {
 	switch settings.SiteTheme {
 	case "dark":
 		return darkThemeCSS
+	case "custom":
+		return generateCustomThemeCSS(settings.CustomBgColor, settings.CustomTextColor, settings.CustomAccentColor)
 	default:
 		return defaultThemeCSS
 	}
+}
+
+// generateCustomThemeCSS creates a custom theme CSS based on 3 base colors
+func generateCustomThemeCSS(bgColor, textColor, accentColor string) string {
+	// Parse colors and calculate derived colors
+	isLight := isLightHexColor(bgColor)
+
+	// Derive secondary colors from the base colors
+	headerBg := adjustHexBrightness(bgColor, ifThen(isLight, -5, 10))
+	cardBg := adjustHexBrightness(bgColor, ifThen(isLight, 3, 5))
+	borderColor := adjustHexBrightness(bgColor, ifThen(isLight, -15, 20))
+	secondaryText := blendColors(textColor, bgColor, 0.5)
+	hoverShadow := "rgba(0, 0, 0, 0.15)"
+	if !isLight {
+		hoverShadow = "rgba(255, 255, 255, 0.1)"
+	}
+	subtleBorder := adjustHexBrightness(bgColor, ifThen(isLight, -8, 12))
+
+	return fmt.Sprintf(`
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: %[1]s;
+            color: %[2]s;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 614px;
+            margin: 0 auto;
+            background-color: %[1]s;
+            min-height: 100vh;
+        }
+
+        .header {
+            background: %[3]s;
+            padding: 20px 32px;
+            color: %[2]s;
+            border-bottom: 1px solid %[4]s;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .header-content {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .header h1 {
+            font-size: 28px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-family: 'Segoe UI', Roboto, sans-serif;
+        }
+
+        .subtitle {
+            font-size: 14px;
+            color: %[5]s;
+            margin-top: 4px;
+            font-weight: 400;
+        }
+
+        .stats {
+            padding: 16px 0;
+            background-color: %[1]s;
+            display: none;
+        }
+
+        .stat {
+            text-align: center;
+            padding: 16px;
+            background-color: %[6]s;
+            border: 1px solid %[4]s;
+            border-radius: 8px;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .stat:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 2px 8px %[7]s;
+        }
+
+        .stat-value {
+            font-size: 32px;
+            font-weight: 700;
+            color: %[2]s;
+            margin-bottom: 4px;
+        }
+
+        .stat-label {
+            font-size: 13px;
+            color: %[5]s;
+            text-transform: uppercase;
+            font-weight: 500;
+            letter-spacing: 0.5px;
+        }
+
+        .feed {
+            padding: 24px 0 80px;
+        }
+
+        .entry {
+            padding: 0;
+            margin-bottom: 24px;
+            background-color: %[6]s;
+            border: 1px solid %[4]s;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .entry:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px %[7]s;
+        }
+
+        .entry-header {
+            display: flex;
+            align-items: center;
+            padding: 14px 16px;
+            border-bottom: 1px solid %[8]s;
+        }
+
+        .avatar {
+            width: 56px;
+            height: 56px;
+            border-radius: 50%%;
+            background: %[9]s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            font-size: 20px;
+            color: #ffffff;
+            margin-right: 16px;
+            flex-shrink: 0;
+            padding: 3px;
+        }
+
+        .avatar-inner {
+            width: 100%%;
+            height: 100%%;
+            background: %[6]s;
+            border-radius: 50%%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: %[2]s;
+        }
+
+        .entry-info {
+            flex: 1;
+        }
+
+        .username {
+            display: none;
+        }
+
+        .timestamp {
+            color: %[5]s;
+            font-size: 12px;
+            font-weight: 400;
+            margin-top: 4px;
+            display: block;
+        }
+
+        .entry-photo-container {
+            width: 100%%;
+            max-width: 1024px;
+            height: 0;
+            padding-bottom: 100%%;
+            position: relative;
+            overflow: hidden;
+            background-color: #000000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .entry-photo {
+            position: absolute;
+            top: 50%%;
+            left: 50%%;
+            transform: translate(-50%%, -50%%);
+            max-width: 100%%;
+            max-height: 100%%;
+            width: auto;
+            height: auto;
+            object-fit: contain;
+            display: block;
+        }
+
+        .entry-actions {
+            display: none;
+        }
+
+        .action-btn {
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 24px;
+            padding: 8px;
+            line-height: 1;
+            color: %[2]s;
+            transition: opacity 0.2s;
+        }
+
+        .action-btn:hover {
+            opacity: 0.6;
+        }
+
+        .entry-content {
+            font-size: 15px;
+            color: %[2]s;
+            line-height: 20px;
+            padding: 16px 16px 4px;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
+
+        .entry-content h2 {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: %[2]s;
+        }
+
+        .entry-content p {
+            font-size: 15px;
+            line-height: 1.6;
+            color: %[2]s;
+        }
+
+        .entry-content a {
+            color: %[9]s;
+            text-decoration: none;
+            font-weight: 500;
+        }
+
+        .entry-content a:hover {
+            text-decoration: underline;
+        }
+
+        .entry-content-username {
+            display: none;
+        }
+
+        .entry-timestamp {
+            padding: 4px 16px 16px;
+            color: %[5]s;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.2px;
+        }
+
+        .entry-footer {
+            display: none;
+        }
+
+        .entry-id {
+            color: %[5]s;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .entry-badge {
+            background-color: %[9]s;
+            color: #ffffff;
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .empty-state {
+            padding: 80px 32px;
+            text-align: center;
+        }
+
+        .empty-state-icon {
+            width: 120px;
+            height: 120px;
+            margin: 0 auto 24px;
+            background: %[6]s;
+            border-radius: 50%%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 64px;
+            border: 2px solid %[4]s;
+        }
+
+        .empty-state-title {
+            font-size: 28px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            color: %[2]s;
+        }
+
+        .empty-state-text {
+            font-size: 16px;
+            color: %[5]s;
+            max-width: 400px;
+            margin: 0 auto;
+        }
+
+        .loading-indicator {
+            text-align: center;
+            padding: 24px;
+            color: %[5]s;
+            font-size: 14px;
+            display: none;
+        }
+
+        .loading-indicator.show {
+            display: block;
+        }
+
+        .loading-spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 2px solid %[4]s;
+            border-top-color: %[2]s;
+            border-radius: 50%%;
+            animation: spin 0.8s linear infinite;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .end-message {
+            text-align: center;
+            padding: 24px;
+            color: %[5]s;
+            font-size: 14px;
+            display: none;
+        }
+
+        .end-message.show {
+            display: block;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: %[5]s;
+        }
+
+        .rss-link {
+            text-align: center;
+            padding: 20px;
+        }
+
+        .rss-link a {
+            color: %[9]s;
+            text-decoration: none;
+            font-size: 14px;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                background-color: %[6]s;
+            }
+
+            .header {
+                padding: 16px 20px;
+            }
+
+            .header h1 {
+                font-size: 24px;
+            }
+
+            .stats {
+                padding: 12px 16px;
+                gap: 12px;
+            }
+
+            .stat {
+                padding: 12px;
+            }
+
+            .stat-value {
+                font-size: 24px;
+            }
+
+            .feed {
+                padding: 0 0 80px;
+            }
+
+            .entry {
+                margin-bottom: 12px;
+                border-radius: 0;
+                border-left: none;
+                border-right: none;
+            }
+        }
+`, bgColor, textColor, headerBg, borderColor, secondaryText, cardBg, hoverShadow, subtleBorder, accentColor)
+}
+
+// Helper functions for color manipulation
+func isLightHexColor(hex string) bool {
+	if len(hex) != 7 || hex[0] != '#' {
+		return true // default to light
+	}
+	r, _ := strconv.ParseInt(hex[1:3], 16, 64)
+	g, _ := strconv.ParseInt(hex[3:5], 16, 64)
+	b, _ := strconv.ParseInt(hex[5:7], 16, 64)
+	luminance := (0.299*float64(r) + 0.587*float64(g) + 0.114*float64(b)) / 255
+	return luminance > 0.5
+}
+
+func adjustHexBrightness(hex string, percent int) string {
+	if len(hex) != 7 || hex[0] != '#' {
+		return hex
+	}
+	r, _ := strconv.ParseInt(hex[1:3], 16, 64)
+	g, _ := strconv.ParseInt(hex[3:5], 16, 64)
+	b, _ := strconv.ParseInt(hex[5:7], 16, 64)
+
+	r = clamp(r + int64(float64(r)*float64(percent)/100), 0, 255)
+	g = clamp(g + int64(float64(g)*float64(percent)/100), 0, 255)
+	b = clamp(b + int64(float64(b)*float64(percent)/100), 0, 255)
+
+	return fmt.Sprintf("#%02x%02x%02x", r, g, b)
+}
+
+func blendColors(color1, color2 string, ratio float64) string {
+	if len(color1) != 7 || color1[0] != '#' || len(color2) != 7 || color2[0] != '#' {
+		return color1
+	}
+	r1, _ := strconv.ParseInt(color1[1:3], 16, 64)
+	g1, _ := strconv.ParseInt(color1[3:5], 16, 64)
+	b1, _ := strconv.ParseInt(color1[5:7], 16, 64)
+	r2, _ := strconv.ParseInt(color2[1:3], 16, 64)
+	g2, _ := strconv.ParseInt(color2[3:5], 16, 64)
+	b2, _ := strconv.ParseInt(color2[5:7], 16, 64)
+
+	r := int64(float64(r1)*(1-ratio) + float64(r2)*ratio)
+	g := int64(float64(g1)*(1-ratio) + float64(g2)*ratio)
+	b := int64(float64(b1)*(1-ratio) + float64(b2)*ratio)
+
+	return fmt.Sprintf("#%02x%02x%02x", r, g, b)
+}
+
+func clamp(value, min, max int64) int64 {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
+
+func ifThen(condition bool, trueVal, falseVal int) int {
+	if condition {
+		return trueVal
+	}
+	return falseVal
 }
 
 // Authentication handlers
@@ -2709,14 +3383,29 @@ func handleRemovePrivacyPassword(w http.ResponseWriter, r *http.Request) {
 func getSiteSettings() (SiteSettings, error) {
 	var settings SiteSettings
 	var viewerPasswordHash, adminPasswordHash, avatarPath, avatarPreference sql.NullString
+	var customBgColor, customTextColor, customAccentColor sql.NullString
 
 	err := db.QueryRow(`
-		SELECT site_title, site_subtitle, user_initial, avatar_path, avatar_preference, site_theme, viewer_password_hash, admin_password_hash
+		SELECT site_title, site_subtitle, user_initial, avatar_path, avatar_preference, site_theme,
+		       viewer_password_hash, admin_password_hash, custom_bg_color, custom_text_color, custom_accent_color
 		FROM site_settings WHERE id = 1
-	`).Scan(&settings.SiteTitle, &settings.SiteSubtitle, &settings.UserInitial, &avatarPath, &avatarPreference, &settings.SiteTheme, &viewerPasswordHash, &adminPasswordHash)
+	`).Scan(&settings.SiteTitle, &settings.SiteSubtitle, &settings.UserInitial, &avatarPath, &avatarPreference,
+		&settings.SiteTheme, &viewerPasswordHash, &adminPasswordHash, &customBgColor, &customTextColor, &customAccentColor)
 
 	if err != nil {
-		return settings, err
+		// If query fails, it might be due to missing columns - try running migrations
+		if migErr := runDatabaseMigrations(); migErr == nil {
+			// Retry the query after migrations
+			err = db.QueryRow(`
+				SELECT site_title, site_subtitle, user_initial, avatar_path, avatar_preference, site_theme,
+				       viewer_password_hash, admin_password_hash, custom_bg_color, custom_text_color, custom_accent_color
+				FROM site_settings WHERE id = 1
+			`).Scan(&settings.SiteTitle, &settings.SiteSubtitle, &settings.UserInitial, &avatarPath, &avatarPreference,
+				&settings.SiteTheme, &viewerPasswordHash, &adminPasswordHash, &customBgColor, &customTextColor, &customAccentColor)
+		}
+		if err != nil {
+			return settings, err
+		}
 	}
 
 	if avatarPath.Valid {
@@ -2729,6 +3418,23 @@ func getSiteSettings() (SiteSettings, error) {
 		settings.AvatarPreference = "initials" // default
 	}
 
+	// Set custom colors with defaults
+	if customBgColor.Valid && customBgColor.String != "" {
+		settings.CustomBgColor = customBgColor.String
+	} else {
+		settings.CustomBgColor = "#fafafa"
+	}
+	if customTextColor.Valid && customTextColor.String != "" {
+		settings.CustomTextColor = customTextColor.String
+	} else {
+		settings.CustomTextColor = "#262626"
+	}
+	if customAccentColor.Valid && customAccentColor.String != "" {
+		settings.CustomAccentColor = customAccentColor.String
+	} else {
+		settings.CustomAccentColor = "#0095f6"
+	}
+
 	settings.HasViewerPassword = viewerPasswordHash.Valid && viewerPasswordHash.String != ""
 	settings.HasAdminPassword = adminPasswordHash.Valid && adminPasswordHash.String != ""
 
@@ -2736,6 +3442,22 @@ func getSiteSettings() (SiteSettings, error) {
 }
 
 func handleSettings(w http.ResponseWriter, r *http.Request) {
+	handleSettingsWithView(w, r, "site-info")
+}
+
+func handleSettingsAppearance(w http.ResponseWriter, r *http.Request) {
+	handleSettingsWithView(w, r, "appearance")
+}
+
+func handleSettingsSecurity(w http.ResponseWriter, r *http.Request) {
+	handleSettingsWithView(w, r, "security")
+}
+
+func handleSettingsBackup(w http.ResponseWriter, r *http.Request) {
+	handleSettingsWithView(w, r, "backup")
+}
+
+func handleSettingsWithView(w http.ResponseWriter, r *http.Request, view string) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -2792,6 +3514,18 @@ func handleSettings(w http.ResponseWriter, r *http.Request) {
 		canEnableCustomDomain = isPostastiqSubdomain(currentHost)
 	}
 
+	// Set page title based on view
+	pageTitles := map[string]string{
+		"site-info":  "Site Info",
+		"appearance": "Appearance",
+		"security":   "Security",
+		"backup":     "Backup",
+	}
+	pageTitle := pageTitles[view]
+	if pageTitle == "" {
+		pageTitle = "Settings"
+	}
+
 	data := SettingsPageData{
 		Settings:              settings,
 		Message:               message,
@@ -2800,6 +3534,8 @@ func handleSettings(w http.ResponseWriter, r *http.Request) {
 		InstanceHostname:      instanceHostname,
 		CustomDomainEnabled:   customDomainEnabled,
 		CanEnableCustomDomain: canEnableCustomDomain,
+		View:                  view,
+		PageTitle:             pageTitle,
 	}
 
 	tmpl, err := template.New("settings").Parse(settingsTemplate)
@@ -2816,37 +3552,48 @@ func handleSettingsUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get form values
+	// Get the section being updated
+	section := r.FormValue("section")
+	if section == "" {
+		section = "site-info"
+	}
+
+	switch section {
+	case "site-info":
+		handleSiteInfoUpdate(w, r)
+	case "appearance":
+		handleAppearanceUpdate(w, r)
+	case "security":
+		handleSecurityUpdate(w, r)
+	default:
+		showSettingsMessage(w, r, "Invalid section", "error", section)
+	}
+}
+
+func handleSiteInfoUpdate(w http.ResponseWriter, r *http.Request) {
 	siteTitle := r.FormValue("site_title")
 	siteSubtitle := r.FormValue("site_subtitle")
 	userInitial := r.FormValue("user_initial")
-	siteTheme := r.FormValue("site_theme")
-	avatarPreference := r.FormValue("avatar_preference")
-	adminPassword := r.FormValue("admin_password")
-	adminPasswordConfirm := r.FormValue("admin_password_confirm")
-	viewerPassword := r.FormValue("viewer_password")
-	removeViewerPassword := r.FormValue("remove_viewer_password")
 
 	// Validate inputs
 	if siteTitle == "" || siteSubtitle == "" || userInitial == "" {
-		showSettingsMessage(w, r, "Site title, subtitle, and user initial are required", "error")
+		showSettingsMessage(w, r, "Site title, subtitle, and user initial are required", "error", "site-info")
 		return
 	}
 
 	if len(userInitial) > 3 {
-		showSettingsMessage(w, r, "User initial must be 1-3 characters", "error")
+		showSettingsMessage(w, r, "User initial must be 1-3 characters", "error", "site-info")
 		return
 	}
 
 	// Handle avatar upload
-	var avatarPath string
 	file, header, err := r.FormFile("avatar")
 	if err == nil {
 		defer file.Close()
-		avatarPath, err = validateAndResizeAvatar(file, header.Filename)
+		avatarPath, err := validateAndResizeAvatar(file, header.Filename)
 		if err != nil {
 			log.Printf("Error saving avatar: %v", err)
-			showSettingsMessage(w, r, "Failed to save avatar: "+err.Error(), "error")
+			showSettingsMessage(w, r, "Failed to save avatar: "+err.Error(), "error", "site-info")
 			return
 		}
 
@@ -2854,40 +3601,90 @@ func handleSettingsUpdate(w http.ResponseWriter, r *http.Request) {
 		_, err = db.Exec("UPDATE site_settings SET avatar_path = ? WHERE id = 1", avatarPath)
 		if err != nil {
 			log.Printf("Error updating avatar path: %v", err)
-			showSettingsMessage(w, r, "Failed to update avatar", "error")
+			showSettingsMessage(w, r, "Failed to update avatar", "error", "site-info")
 			return
 		}
 	}
+
+	// Update site info settings
+	_, err = db.Exec(`
+		UPDATE site_settings
+		SET site_title = ?, site_subtitle = ?, user_initial = ?
+		WHERE id = 1
+	`, siteTitle, siteSubtitle, userInitial)
+
+	if err != nil {
+		log.Printf("Error updating settings: %v", err)
+		showSettingsMessage(w, r, "Failed to update settings", "error", "site-info")
+		return
+	}
+
+	showSettingsMessage(w, r, "Site info updated successfully!", "success", "site-info")
+}
+
+func handleAppearanceUpdate(w http.ResponseWriter, r *http.Request) {
+	siteTheme := r.FormValue("site_theme")
+	avatarPreference := r.FormValue("avatar_preference")
+	customBgColor := r.FormValue("custom_bg_color")
+	customTextColor := r.FormValue("custom_text_color")
+	customAccentColor := r.FormValue("custom_accent_color")
 
 	// Set default avatar preference if not provided
 	if avatarPreference == "" {
 		avatarPreference = "initials"
 	}
 
-	// Update basic settings including avatar preference
-	_, err = db.Exec(`
-		UPDATE site_settings
-		SET site_title = ?, site_subtitle = ?, user_initial = ?, site_theme = ?, avatar_preference = ?
-		WHERE id = 1
-	`, siteTitle, siteSubtitle, userInitial, siteTheme, avatarPreference)
+	// Set default custom colors if not provided
+	if customBgColor == "" {
+		customBgColor = "#fafafa"
+	}
+	if customTextColor == "" {
+		customTextColor = "#262626"
+	}
+	if customAccentColor == "" {
+		customAccentColor = "#0095f6"
+	}
 
-	if err != nil {
-		log.Printf("Error updating settings: %v", err)
-		showSettingsMessage(w, r, "Failed to update settings", "error")
+	// Validate color format (basic hex color validation)
+	colorRegex := regexp.MustCompile(`^#[0-9A-Fa-f]{6}$`)
+	if !colorRegex.MatchString(customBgColor) || !colorRegex.MatchString(customTextColor) || !colorRegex.MatchString(customAccentColor) {
+		showSettingsMessage(w, r, "Invalid color format. Please use hex colors (e.g., #ffffff)", "error", "appearance")
 		return
 	}
+
+	// Update appearance settings including custom colors
+	_, err := db.Exec(`
+		UPDATE site_settings
+		SET site_theme = ?, avatar_preference = ?, custom_bg_color = ?, custom_text_color = ?, custom_accent_color = ?
+		WHERE id = 1
+	`, siteTheme, avatarPreference, customBgColor, customTextColor, customAccentColor)
+
+	if err != nil {
+		log.Printf("Error updating appearance settings: %v", err)
+		showSettingsMessage(w, r, "Failed to update appearance settings", "error", "appearance")
+		return
+	}
+
+	showSettingsMessage(w, r, "Appearance updated successfully!", "success", "appearance")
+}
+
+func handleSecurityUpdate(w http.ResponseWriter, r *http.Request) {
+	adminPassword := r.FormValue("admin_password")
+	adminPasswordConfirm := r.FormValue("admin_password_confirm")
+	viewerPassword := r.FormValue("viewer_password")
+	removeViewerPassword := r.FormValue("remove_viewer_password")
 
 	// Handle admin password update
 	if adminPassword != "" {
 		if adminPassword != adminPasswordConfirm {
-			showSettingsMessage(w, r, "Admin passwords do not match", "error")
+			showSettingsMessage(w, r, "Admin passwords do not match", "error", "security")
 			return
 		}
 
 		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(adminPassword), bcrypt.DefaultCost)
 		if err != nil {
 			log.Printf("Error hashing admin password: %v", err)
-			showSettingsMessage(w, r, "Failed to update admin password", "error")
+			showSettingsMessage(w, r, "Failed to update admin password", "error", "security")
 			return
 		}
 
@@ -2895,36 +3692,36 @@ func handleSettingsUpdate(w http.ResponseWriter, r *http.Request) {
 		_, err = db.Exec("UPDATE site_settings SET admin_password_hash = ?, password_change_required = 0 WHERE id = 1", string(hashedPassword))
 		if err != nil {
 			log.Printf("Error updating admin password: %v", err)
-			showSettingsMessage(w, r, "Failed to update admin password", "error")
+			showSettingsMessage(w, r, "Failed to update admin password", "error", "security")
 			return
 		}
 	}
 
 	// Handle viewer password
 	if removeViewerPassword == "true" {
-		_, err = db.Exec("UPDATE site_settings SET viewer_password_hash = NULL WHERE id = 1")
+		_, err := db.Exec("UPDATE site_settings SET viewer_password_hash = NULL WHERE id = 1")
 		if err != nil {
 			log.Printf("Error removing viewer password: %v", err)
-			showSettingsMessage(w, r, "Failed to remove viewer password", "error")
+			showSettingsMessage(w, r, "Failed to remove viewer password", "error", "security")
 			return
 		}
 	} else if viewerPassword != "" {
 		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(viewerPassword), bcrypt.DefaultCost)
 		if err != nil {
 			log.Printf("Error hashing viewer password: %v", err)
-			showSettingsMessage(w, r, "Failed to update viewer password", "error")
+			showSettingsMessage(w, r, "Failed to update viewer password", "error", "security")
 			return
 		}
 
 		_, err = db.Exec("UPDATE site_settings SET viewer_password_hash = ? WHERE id = 1", string(hashedPassword))
 		if err != nil {
 			log.Printf("Error updating viewer password: %v", err)
-			showSettingsMessage(w, r, "Failed to update viewer password", "error")
+			showSettingsMessage(w, r, "Failed to update viewer password", "error", "security")
 			return
 		}
 	}
 
-	showSettingsMessage(w, r, "Settings updated successfully!", "success")
+	showSettingsMessage(w, r, "Security settings updated successfully!", "success", "security")
 }
 
 func handleBackup(w http.ResponseWriter, r *http.Request) {
@@ -3050,12 +3847,12 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse multipart form - 32MB memory buffer, rest streams to temp files
-	// This allows handling large backup files without memory issues
-	err := r.ParseMultipartForm(32 << 20)
+	// Use small memory buffer (4MB) - excess streams to temp files automatically
+	// This keeps memory usage low for large backup files
+	err := r.ParseMultipartForm(4 << 20)
 	if err != nil {
 		log.Printf("Error parsing restore form: %v", err)
-		showSettingsMessage(w, r, "Failed to parse upload", "error")
+		showSettingsMessage(w, r, "Failed to parse upload", "error", "backup")
 		return
 	}
 
@@ -3063,105 +3860,62 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	file, header, err := r.FormFile("backup_file")
 	if err != nil {
 		log.Printf("Error getting backup file: %v", err)
-		showSettingsMessage(w, r, "No backup file provided", "error")
+		showSettingsMessage(w, r, "No backup file provided", "error", "backup")
 		return
 	}
-	defer file.Close()
 
 	// Validate file extension
 	if !strings.HasSuffix(strings.ToLower(header.Filename), ".zip") {
-		showSettingsMessage(w, r, "Invalid file type. Please upload a ZIP file.", "error")
+		file.Close()
+		showSettingsMessage(w, r, "Invalid file type. Please upload a ZIP file.", "error", "backup")
 		return
 	}
 
-	// Stream upload to temp file (supports large files without memory issues)
+	// Stream upload to temp file using small buffer to minimize memory
 	tempFile, err := os.CreateTemp("", "postastiq-restore-*.zip")
 	if err != nil {
+		file.Close()
 		log.Printf("Error creating temp file: %v", err)
-		showSettingsMessage(w, r, "Failed to process upload", "error")
+		showSettingsMessage(w, r, "Failed to process upload", "error", "backup")
 		return
 	}
 	tempPath := tempFile.Name()
-	defer os.Remove(tempPath) // Clean up temp file when done
+	defer os.Remove(tempPath)
 
-	// Copy uploaded file to temp file
-	written, err := io.Copy(tempFile, file)
+	// Use small copy buffer (32KB) to minimize memory usage
+	copyBuf := make([]byte, 32*1024)
+	written, err := io.CopyBuffer(tempFile, file, copyBuf)
 	tempFile.Close()
+	file.Close()
+
+	// Release multipart form data to free memory
+	r.MultipartForm.RemoveAll()
+	runtime.GC()
+
 	if err != nil {
 		log.Printf("Error writing to temp file: %v", err)
-		showSettingsMessage(w, r, "Failed to save upload", "error")
+		showSettingsMessage(w, r, "Failed to save upload", "error", "backup")
 		return
 	}
 	log.Printf("Received backup file: %s (%d bytes)", header.Filename, written)
-
-	// Open temp file as ZIP
-	zipReader, err := zip.OpenReader(tempPath)
-	if err != nil {
-		log.Printf("Error opening ZIP file: %v", err)
-		showSettingsMessage(w, r, "Invalid ZIP file", "error")
-		return
-	}
-	defer zipReader.Close()
-
-	// Validate ZIP contents - must contain blog.db
-	hasDatabase := false
-	for _, f := range zipReader.File {
-		if f.Name == "blog.db" {
-			hasDatabase = true
-			break
-		}
-	}
-
-	if !hasDatabase {
-		showSettingsMessage(w, r, "Invalid backup: missing blog.db", "error")
-		return
-	}
 
 	// Get paths
 	dbPath := os.Getenv("DB_PATH")
 	if dbPath == "" {
 		dbPath = "/app/data/blog.db"
 	}
-
-	// Extract database to a temp file first (safer - doesn't destroy original on failure)
 	tempDBPath := dbPath + ".restore-temp"
-	var dbExtracted bool
 
-	// First pass: extract database file to temp location
-	for _, f := range zipReader.File {
-		if f.Name == "blog.db" {
-			rc, err := f.Open()
-			if err != nil {
-				log.Printf("Error opening blog.db from ZIP: %v", err)
-				showSettingsMessage(w, r, "Failed to extract database", "error")
-				return
-			}
-
-			outFile, err := os.Create(tempDBPath)
-			if err != nil {
-				rc.Close()
-				log.Printf("Error creating temp database file: %v", err)
-				showSettingsMessage(w, r, "Failed to restore database", "error")
-				return
-			}
-
-			_, err = io.Copy(outFile, rc)
-			outFile.Close()
-			rc.Close()
-
-			if err != nil {
-				os.Remove(tempDBPath)
-				log.Printf("Error writing database file: %v", err)
-				showSettingsMessage(w, r, "Failed to write database", "error")
-				return
-			}
-			dbExtracted = true
-			break
+	// Process ZIP file with minimal memory: extract database first
+	// We open/close the ZIP reader for each phase to allow GC between phases
+	err = extractDatabaseFromZip(tempPath, tempDBPath, copyBuf)
+	if err != nil {
+		if err.Error() == "missing blog.db" {
+			showSettingsMessage(w, r, "Invalid backup: missing blog.db", "error", "backup")
+		} else {
+			log.Printf("Error extracting database: %v", err)
+			showSettingsMessage(w, r, "Failed to extract database", "error", "backup")
 		}
-	}
-
-	if !dbExtracted {
-		showSettingsMessage(w, r, "Invalid backup: missing blog.db", "error")
 		return
 	}
 
@@ -3175,69 +3929,128 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	if err := os.Rename(tempDBPath, dbPath); err != nil {
 		log.Printf("Error replacing database file: %v", err)
 		os.Remove(tempDBPath)
-		// Try to reconnect to original database
 		reconnectDB(dbPath)
-		showSettingsMessage(w, r, "Failed to replace database", "error")
+		showSettingsMessage(w, r, "Failed to replace database", "error", "backup")
 		return
 	}
 
 	// Reconnect to the restored database immediately
 	if err := reconnectDB(dbPath); err != nil {
 		log.Printf("Error reconnecting to restored database: %v", err)
-		showSettingsMessage(w, r, "Database restored but reconnection failed. Please restart the server.", "error")
+		showSettingsMessage(w, r, "Database restored but reconnection failed. Please restart the server.", "error", "backup")
 		return
 	}
 
-	// Second pass: extract upload files (database is already reconnected)
+	// Run database migrations to add any missing columns from newer versions
+	if err := runDatabaseMigrations(); err != nil {
+		log.Printf("Warning: some database migrations failed after restore: %v", err)
+		// Continue anyway - the core restore worked
+	}
+
+	// Force GC before extracting uploads
+	runtime.GC()
+
+	// Extract upload files (database is already reconnected)
+	err = extractUploadsFromZip(tempPath, uploadsDir, copyBuf)
+	if err != nil {
+		log.Printf("Warning: some upload files may not have been restored: %v", err)
+	}
+
+	log.Printf("Backup restored successfully from: %s", header.Filename)
+	showSettingsMessage(w, r, "Backup restored successfully!", "success", "backup")
+}
+
+// extractDatabaseFromZip extracts only the blog.db file from the ZIP
+func extractDatabaseFromZip(zipPath, destPath string, buf []byte) error {
+	zipReader, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return fmt.Errorf("invalid ZIP file: %w", err)
+	}
+	defer zipReader.Close()
+
 	for _, f := range zipReader.File {
 		if f.Name == "blog.db" {
-			continue // Already handled
-		}
-
-		// Handle uploads directory files
-		if strings.HasPrefix(f.Name, "uploads/") {
-			// Get the relative path within uploads
-			relPath := strings.TrimPrefix(f.Name, "uploads/")
-			if relPath == "" {
-				continue // Skip the uploads directory itself
-			}
-
-			targetPath := filepath.Join(uploadsDir, relPath)
-
-			if f.FileInfo().IsDir() {
-				os.MkdirAll(targetPath, 0755)
-				continue
-			}
-
-			// Ensure parent directory exists
-			os.MkdirAll(filepath.Dir(targetPath), 0755)
-
-			// Extract file
 			rc, err := f.Open()
 			if err != nil {
-				log.Printf("Error opening %s from ZIP: %v", f.Name, err)
-				continue
+				return fmt.Errorf("failed to open blog.db in ZIP: %w", err)
 			}
 
-			outFile, err := os.Create(targetPath)
+			outFile, err := os.Create(destPath)
 			if err != nil {
 				rc.Close()
-				log.Printf("Error creating %s: %v", targetPath, err)
-				continue
+				return fmt.Errorf("failed to create database file: %w", err)
 			}
 
-			_, err = io.Copy(outFile, rc)
+			_, err = io.CopyBuffer(outFile, rc, buf)
 			outFile.Close()
 			rc.Close()
 
 			if err != nil {
-				log.Printf("Error writing %s: %v", targetPath, err)
+				os.Remove(destPath)
+				return fmt.Errorf("failed to write database file: %w", err)
 			}
+			return nil
 		}
 	}
 
-	log.Printf("Backup restored successfully from: %s", header.Filename)
-	showSettingsMessage(w, r, "Backup restored successfully!", "success")
+	return fmt.Errorf("missing blog.db")
+}
+
+// extractUploadsFromZip extracts upload files from the ZIP one at a time
+func extractUploadsFromZip(zipPath, uploadsDir string, buf []byte) error {
+	zipReader, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return fmt.Errorf("failed to open ZIP: %w", err)
+	}
+	defer zipReader.Close()
+
+	var lastErr error
+	for _, f := range zipReader.File {
+		if !strings.HasPrefix(f.Name, "uploads/") {
+			continue
+		}
+
+		relPath := strings.TrimPrefix(f.Name, "uploads/")
+		if relPath == "" {
+			continue
+		}
+
+		targetPath := filepath.Join(uploadsDir, relPath)
+
+		if f.FileInfo().IsDir() {
+			os.MkdirAll(targetPath, 0755)
+			continue
+		}
+
+		// Ensure parent directory exists
+		os.MkdirAll(filepath.Dir(targetPath), 0755)
+
+		// Extract file with minimal memory
+		if err := extractSingleFile(f, targetPath, buf); err != nil {
+			log.Printf("Error extracting %s: %v", f.Name, err)
+			lastErr = err
+		}
+	}
+
+	return lastErr
+}
+
+// extractSingleFile extracts a single file from ZIP using provided buffer
+func extractSingleFile(f *zip.File, destPath string, buf []byte) error {
+	rc, err := f.Open()
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+
+	outFile, err := os.Create(destPath)
+	if err != nil {
+		return err
+	}
+	defer outFile.Close()
+
+	_, err = io.CopyBuffer(outFile, rc, buf)
+	return err
 }
 
 // reconnectDB closes the existing connection and opens a new one
@@ -3506,6 +4319,12 @@ func adminRouter(w http.ResponseWriter, r *http.Request) {
 		handleRemovePrivacyPassword(w, r)
 	case path == "/admin/settings":
 		handleSettings(w, r)
+	case path == "/admin/settings/appearance":
+		handleSettingsAppearance(w, r)
+	case path == "/admin/settings/security":
+		handleSettingsSecurity(w, r)
+	case path == "/admin/settings/backup":
+		handleSettingsBackup(w, r)
 	case path == "/admin/settings/update":
 		handleSettingsUpdate(w, r)
 	case path == "/admin/backup":
@@ -3801,8 +4620,24 @@ func handleRSSFeed(w http.ResponseWriter, r *http.Request) {
 		// GUID (unique identifier)
 		fmt.Fprintf(w, `<guid isPermaLink="true">%s</guid>`, html.EscapeString(postURL))
 
-		// Description (full content)
-		fmt.Fprintf(w, `<description>%s</description>`, html.EscapeString(string(entry.Content)))
+		// Description (text content only - media handled via enclosure tag)
+		fmt.Fprintf(w, `<description><![CDATA[%s]]></description>`, string(entry.Content))
+
+		// Enclosure for photos (standard RSS 2.0 media handling)
+		if entry.HasPhoto && entry.Photo != "" {
+			photoURL := fmt.Sprintf("%s%s", baseURL, string(entry.Photo))
+			// Determine MIME type from file extension
+			mimeType := "image/jpeg" // default
+			photoStr := string(entry.Photo)
+			if strings.HasSuffix(strings.ToLower(photoStr), ".png") {
+				mimeType = "image/png"
+			} else if strings.HasSuffix(strings.ToLower(photoStr), ".gif") {
+				mimeType = "image/gif"
+			} else if strings.HasSuffix(strings.ToLower(photoStr), ".webp") {
+				mimeType = "image/webp"
+			}
+			fmt.Fprintf(w, `<enclosure url="%s" type="%s" length="0" />`, html.EscapeString(photoURL), mimeType)
+		}
 
 		// Publication date
 		fmt.Fprintf(w, `<pubDate>%s</pubDate>`, entry.CreatedAt.UTC().Format(time.RFC1123Z))
