@@ -16,7 +16,7 @@ const postTemplate = `<!DOCTYPE html>
             <div class="header-content">
                 <div>
                     <h1><a href="/" style="color: inherit; text-decoration: none;">{{.SiteTitle}}</a></h1>
-                    <div class="subtitle">{{.SiteSubtitle}}</div>
+                    {{if .EnableSubtitle}}<div class="subtitle">{{.SiteSubtitle}}</div>{{end}}
                 </div>
             </div>
         </div>
