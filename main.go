@@ -73,6 +73,7 @@ type ViewerPageData struct {
 	Last24Hours      int
 	SiteTitle        string
 	SiteSubtitle     string
+	EnableSubtitle   bool
 	UserInitial      string
 	AvatarPath       string
 	AvatarPreference string
@@ -86,6 +87,7 @@ type EditorPageData struct {
 	MessageType        string
 	Entries            []Entry
 	HasPrivacyPassword bool
+	EnableAudioUploads bool
 	// New fields for sidebar layout and pagination
 	View         string
 	PageTitle    string
@@ -101,6 +103,7 @@ type SinglePostPageData struct {
 	Entry            EntryDisplay
 	SiteTitle        string
 	SiteSubtitle     string
+	EnableSubtitle   bool
 	UserInitial      string
 	AvatarPath       string
 	AvatarPreference string
@@ -125,6 +128,7 @@ type SettingsPageData struct {
 	Message               string
 	MessageType           string
 	Settings              SiteSettings
+	EnableSubtitle        bool
 	CustomDomain          *CustomDomain
 	InstanceHostname      string
 	CustomDomainEnabled   bool
@@ -134,11 +138,12 @@ type SettingsPageData struct {
 }
 
 type NotFoundPageData struct {
-	SiteTitle     string
-	SiteSubtitle  string
-	UserInitial   string
-	RecentEntries []EntryDisplay
-	ThemeCSS      template.CSS
+	SiteTitle      string
+	SiteSubtitle   string
+	EnableSubtitle bool
+	UserInitial    string
+	RecentEntries  []EntryDisplay
+	ThemeCSS       template.CSS
 }
 
 type APIResponse struct {
@@ -180,6 +185,8 @@ type CustomDomain struct {
 var db *sql.DB
 var urlRegex *regexp.Regexp
 var uploadsDir string
+var enableAudioUploads bool
+var enableSubtitle bool
 var sessions = make(map[string]*Session)
 var sessionMutex sync.RWMutex
 
@@ -262,6 +269,12 @@ func initDB() error {
 	if uploadsDir == "" {
 		uploadsDir = "/app/data/uploads"
 	}
+
+	// Audio uploads disabled by default, enable via environment variable
+	enableAudioUploads = os.Getenv("ENABLE_AUDIO_UPLOADS") == "true"
+
+	// Subtitle disabled by default, enable via environment variable
+	enableSubtitle = os.Getenv("ENABLE_SUBTITLE") == "true"
 
 	// Create uploads directory if it doesn't exist
 	if err := os.MkdirAll(uploadsDir, 0755); err != nil {
@@ -1377,6 +1390,11 @@ func saveUploadedFile(file io.Reader, filename string) (string, error) {
 }
 
 func validateMediaAndSave(file io.Reader, filename string, title string, createdAt time.Time, mediaType string) (string, error) {
+	// Check if audio uploads are enabled
+	if mediaType == "audio" && !enableAudioUploads {
+		return "", fmt.Errorf("audio uploads are disabled")
+	}
+
 	data, err := io.ReadAll(file)
 	if err != nil {
 		return "", fmt.Errorf("failed to read file: %v", err)
@@ -1978,6 +1996,7 @@ func handleBlogFeed(w http.ResponseWriter, r *http.Request) {
 		TodayEntries:     todayEntries,
 		SiteTitle:        settings.SiteTitle,
 		SiteSubtitle:     settings.SiteSubtitle,
+		EnableSubtitle:   enableSubtitle,
 		UserInitial:      settings.UserInitial,
 		AvatarPath:       settings.AvatarPath,
 		AvatarPreference: settings.AvatarPreference,
@@ -2142,6 +2161,7 @@ func handleSinglePost(w http.ResponseWriter, r *http.Request) {
 		Entry:            entryDisplay,
 		SiteTitle:        settings.SiteTitle,
 		SiteSubtitle:     settings.SiteSubtitle,
+		EnableSubtitle:   enableSubtitle,
 		UserInitial:      settings.UserInitial,
 		AvatarPath:       settings.AvatarPath,
 		AvatarPreference: settings.AvatarPreference,
@@ -2185,11 +2205,12 @@ func handle404(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := NotFoundPageData{
-		SiteTitle:     settings.SiteTitle,
-		SiteSubtitle:  settings.SiteSubtitle,
-		UserInitial:   settings.UserInitial,
-		RecentEntries: recentEntries,
-		ThemeCSS:      template.CSS(getThemeCSS()),
+		SiteTitle:      settings.SiteTitle,
+		SiteSubtitle:   settings.SiteSubtitle,
+		EnableSubtitle: enableSubtitle,
+		UserInitial:    settings.UserInitial,
+		RecentEntries:  recentEntries,
+		ThemeCSS:       template.CSS(getThemeCSS()),
 	}
 
 	tmpl, err := template.New("404").Parse(notFoundTemplate)
@@ -2261,6 +2282,7 @@ func handleAdminIndex(w http.ResponseWriter, r *http.Request) {
 
 	data := EditorPageData{
 		HasPrivacyPassword: hasPassword,
+		EnableAudioUploads: enableAudioUploads,
 		Message:            message,
 		MessageType:        messageType,
 		View:               view,
@@ -3528,6 +3550,7 @@ func handleSettingsWithView(w http.ResponseWriter, r *http.Request, view string)
 
 	data := SettingsPageData{
 		Settings:              settings,
+		EnableSubtitle:        enableSubtitle,
 		Message:               message,
 		MessageType:           messageType,
 		CustomDomain:          customDomain,

@@ -487,11 +487,13 @@ const settingsTemplate = `<!DOCTYPE html>
                         <div class="file-info">The main title displayed on your blog</div>
                     </div>
 
+                    {{if .EnableSubtitle}}
                     <div class="form-group">
                         <label for="siteSubtitle">Site Subtitle</label>
                         <input type="text" name="site_subtitle" id="siteSubtitle" value="{{.Settings.SiteSubtitle}}" required>
                         <div class="file-info">Subtitle or tagline displayed below the title</div>
                     </div>
+                    {{end}}
 
                     <button type="submit" class="full-width">Save Site Info</button>
                 </form>
@@ -550,7 +552,7 @@ const settingsTemplate = `<!DOCTYPE html>
                                         <div id="previewAvatar" style="width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 12px; color: white;">{{.Settings.UserInitial}}</div>
                                         <div>
                                             <div id="previewTitle" style="font-weight: 600; font-size: 14px;">{{.Settings.SiteTitle}}</div>
-                                            <div id="previewSubtitle" style="font-size: 12px; opacity: 0.7;">{{.Settings.SiteSubtitle}}</div>
+                                            {{if .EnableSubtitle}}<div id="previewSubtitle" style="font-size: 12px; opacity: 0.7;">{{.Settings.SiteSubtitle}}</div>{{end}}
                                         </div>
                                     </div>
                                 </div>
@@ -615,7 +617,8 @@ const settingsTemplate = `<!DOCTYPE html>
                 document.getElementById('previewAvatar').style.backgroundColor = accent;
                 document.getElementById('previewLink').style.color = accent;
                 document.getElementById('previewTitle').style.color = text;
-                document.getElementById('previewSubtitle').style.color = text;
+                var previewSubtitle = document.getElementById('previewSubtitle');
+                if (previewSubtitle) previewSubtitle.style.color = text;
                 document.getElementById('previewPostTitle').style.color = text;
                 document.getElementById('previewPostText').style.color = text;
             }

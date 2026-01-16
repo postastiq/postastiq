@@ -670,10 +670,12 @@ const adminTemplate = `<!DOCTYPE html>
                                 <input type="radio" name="media_type" value="photo" checked class="mediaTypeRadio">
                                 <span>Photo</span>
                             </label>
+                            {{if .EnableAudioUploads}}
                             <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
                                 <input type="radio" name="media_type" value="audio" class="mediaTypeRadio">
                                 <span>Audio</span>
                             </label>
+                            {{end}}
                             <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
                                 <input type="radio" name="media_type" value="video" class="mediaTypeRadio">
                                 <span>Video</span>
@@ -697,6 +699,7 @@ const adminTemplate = `<!DOCTYPE html>
                     </div>
 
                     <!-- Audio Source Options -->
+                    {{if .EnableAudioUploads}}
                     <div class="audio-source-options" id="audioSourceOptions">
                         <div class="audio-source-radio">
                             <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
@@ -737,6 +740,7 @@ const adminTemplate = `<!DOCTYPE html>
                             </div>
                         </div>
                     </div>
+                    {{end}}
 
                     <!-- Thumbnail Upload -->
                     <div class="form-group" id="thumbnailUploadGroup" style="display: none;">
@@ -781,10 +785,12 @@ const adminTemplate = `<!DOCTYPE html>
                             <input type="radio" name="media_type" value="photo" checked class="editMediaTypeRadio">
                             <span>Photo</span>
                         </label>
+                        {{if .EnableAudioUploads}}
                         <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
                             <input type="radio" name="media_type" value="audio" class="editMediaTypeRadio">
                             <span>Audio</span>
                         </label>
+                        {{end}}
                         <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
                             <input type="radio" name="media_type" value="video" class="editMediaTypeRadio">
                             <span>Video</span>
