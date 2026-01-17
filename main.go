@@ -3599,8 +3599,12 @@ func handleSiteInfoUpdate(w http.ResponseWriter, r *http.Request) {
 	userInitial := r.FormValue("user_initial")
 
 	// Validate inputs
-	if siteTitle == "" || siteSubtitle == "" || userInitial == "" {
-		showSettingsMessage(w, r, "Site title, subtitle, and user initial are required", "error", "site-info")
+	if siteTitle == "" || userInitial == "" {
+		showSettingsMessage(w, r, "Site title and user initial are required", "error", "site-info")
+		return
+	}
+	if enableSubtitle && siteSubtitle == "" {
+		showSettingsMessage(w, r, "Site subtitle is required", "error", "site-info")
 		return
 	}
 
